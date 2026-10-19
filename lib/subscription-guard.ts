@@ -1347,6 +1347,54 @@ function stripAliasStubs(payload: Record<string, unknown>): Record<string, unkno
 	return { ...payload, tools: kept };
 }
 
+// Project request-local transcript state BEFORE providers serialize/cache/seal it.
+// In particular pi-background-tasks protects both cache positions and lineage;
+// changing the serialized tool list in before_provider_request is too late.
+function transformTranscript(messages: unknown[], plan: boolean, disableFilter: boolean): unknown[] {
+	const active = new Map<string, Record<string, unknown>>();
+	let previous = new Map<string, Record<string, unknown>>();
+	return messages.map((message) => {
+		if (!isPlainObject(message)) return message;
+		if (message.role !== "system") {
+			if (!plan || message.role !== "assistant" || !Array.isArray(message.content)) return message;
+			const content = remapBlockNames(message.content, "toolCall", (name) => {
+				const alias = FLAT_TO_MCP.get(lower(name));
+				return alias && registeredMcpAliases.has(lower(alias)) ? alias : undefined;
+			});
+			return content === message.content ? message : { ...message, content };
+		}
+		if (Array.isArray(message.toolsRemoved)) {
+			for (const tool of message.toolsRemoved) {
+				if (isPlainObject(tool) && typeof tool.name === "string") active.delete(lower(tool.name));
+			}
+		}
+		if (Array.isArray(message.toolsAdded)) {
+			for (const tool of message.toolsAdded) {
+				if (isPlainObject(tool) && typeof tool.name === "string") active.set(lower(tool.name), tool);
+			}
+		}
+		const tools = [...active.values()];
+		const projected = plan
+			? filterAndRemapTools(tools, disableFilter)!
+			: (stripAliasStubs({ tools }).tools as unknown[]);
+		const next = collectToolsByName(projected);
+		const toolsRemoved = [...previous.keys()].filter((name) => !next.has(name))
+			.map((name) => ({ name: previous.get(name)!.name }));
+		const toolsAdded = [...next.entries()].filter(([name, tool]) =>
+			JSON.stringify(previous.get(name)) !== JSON.stringify(tool)).map(([, tool]) => tool);
+		previous = next;
+		const result: Record<string, unknown> = { ...message, toolsAdded, toolsRemoved };
+		if (plan) {
+			result.content = rewriteSystemField(message.content);
+			if (isPlainObject(message.sections)) {
+				result.sections = Object.fromEntries(Object.entries(message.sections).map(([key, value]) =>
+					[key, typeof value === "string" ? rewritePromptText(value) : value]));
+			}
+		}
+		return result;
+	});
+}
+
 // ============================================================================
 // Extension entry point
 // ============================================================================
@@ -1375,6 +1423,18 @@ export default async function piClaudeCodeUse(pi: ExtensionAPI): Promise<void> {
 		const rewritten = unaliasToolCalls(event.message);
 		if (!rewritten) return undefined;
 		return { message: rewritten as typeof event.message };
+	});
+
+	pi.on("context_with_system", (event, ctx) => {
+		const model = ctx.model;
+		if (model?.provider !== "anthropic" || !ctx.modelRegistry.isUsingOAuth(model)) return;
+		// Refresh before serialization, including tools registered after our
+		// before_agent_start handler. Keep the existing best-effort semantics.
+		try {
+			registerMcpAliases(pi, { cwd: typeof ctx.cwd === "string" ? ctx.cwd : undefined });
+		} catch { /* The existing aliases remain usable. */ }
+		return { messages: transformTranscript(event.messages, useSubscription(),
+			process.env.PI_CLAUDE_CODE_USE_DISABLE_TOOL_FILTER === "1") as typeof event.messages };
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
@@ -1452,6 +1512,8 @@ export const _test = {
 	},
 	syncAliasActivation,
 	transformPayload,
+	transformTranscript,
+	stripAliasStubs,
 	unaliasDisplayedProse,
 	unaliasToolCalls,
 };
