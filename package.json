@@ -1,6 +1,6 @@
 {
 	"name": "pi-claude-billing-router",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Route Claude Pro/Max OAuth requests in pi between your plan and extra-usage credits: plan first, automatic fallback to credits when the 5h window is exhausted, /billing override, live usage in the footer.",
 	"keywords": [
 		"pi-package",

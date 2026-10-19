@@ -67,7 +67,10 @@ and re-shaped on every request.
 
 Percentages are **used** capacity. Colors: green < 70%, yellow 70–89%, red 90%+.
 Error states (`login needed`, `⚠ HTTP 400`, `(stale)`, `usage n/a`) are
-inherited from the upstream connector. `⚠ extra usage` only appears when a
+inherited from the upstream connector. A failed usage read (Anthropic's usage
+endpoint intermittently answers 429) is retried automatically with backoff
+(10s → 20s → 40s → 60s, or `Retry-After` when sent) instead of waiting for the
+next model response. `⚠ extra usage` only appears when a
 request billed extra usage **while the router intended the plan** — i.e. the
 Claude Code shaping is broken, not when credits were chosen on purpose.
 

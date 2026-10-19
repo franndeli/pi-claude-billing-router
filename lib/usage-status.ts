@@ -34,6 +34,10 @@ export const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 export const POLL_MIN_INTERVAL_MS = 30_000;
 export const IDLE_REFRESH_MS = 5 * 60_000;
+// Anthropic's usage endpoint intermittently answers 429; retry quickly with
+// backoff instead of showing "usage n/a" until the idle timer fires.
+export const RETRY_BASE_MS = 10_000;
+export const RETRY_MAX_MS = 60_000;
 export const OVERAGE_HEADER = "anthropic-ratelimit-unified-overage-in-use";
 const CONFLICT_PACKAGE = "@benvargas/pi-claude-code-use";
 // PCBR: the package this one was forked from must not run alongside it either.
@@ -214,6 +218,13 @@ export function shouldPoll(lastPollMs: number | undefined, nowMs: number, minInt
 	return lastPollMs === undefined || nowMs - lastPollMs >= minIntervalMs;
 }
 
+/** Delay before retrying a failed usage fetch: honors Retry-After, else exponential backoff. */
+export function retryDelayMs(attempt: number, retryAfterHeader?: string | null): number {
+	const retryAfter = retryAfterHeader ? Number(retryAfterHeader) : Number.NaN;
+	if (Number.isFinite(retryAfter) && retryAfter > 0) return Math.min(retryAfter * 1000, RETRY_MAX_MS);
+	return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempt), RETRY_MAX_MS);
+}
+
 /** True when a settings `packages` array references the conflicting upstream package. */
 export function hasConflictingPackage(settings: unknown): boolean {
 	if (!isRecord(settings) || !Array.isArray(settings.packages)) return false;
@@ -249,6 +260,8 @@ type UsageProvider = "anthropic" | "openai-codex" | "openai";
 interface ProviderState extends StatusSnapshot {
 	lastPollMs: number | undefined;
 	inFlight: boolean;
+	retryAttempt: number;
+	retryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 export default function usageStatus(pi: ExtensionAPI) {
@@ -267,6 +280,8 @@ export default function usageStatus(pi: ExtensionAPI) {
 				providerErrorStatus: undefined,
 				lastPollMs: undefined,
 				inFlight: false,
+				retryAttempt: 0,
+				retryTimer: undefined,
 			};
 			states.set(provider, state);
 		}
@@ -275,6 +290,23 @@ export default function usageStatus(pi: ExtensionAPI) {
 
 	const paint = (ui: StatusUi, color: string, text: string): string =>
 		ui.theme ? ui.theme.fg(color, text) : text;
+
+	function clearRetry(state: ProviderState): void {
+		if (state.retryTimer) clearTimeout(state.retryTimer);
+		state.retryTimer = undefined;
+		state.retryAttempt = 0;
+	}
+
+	function scheduleRetry(state: ProviderState, retryAfter?: string | null): void {
+		if (state.retryTimer) return;
+		const delay = retryDelayMs(state.retryAttempt, retryAfter);
+		state.retryAttempt += 1;
+		state.retryTimer = setTimeout(() => {
+			state.retryTimer = undefined;
+			if (currentCtx) void refresh(currentCtx, true);
+		}, delay);
+		state.retryTimer.unref?.();
+	}
 
 	function usageProvider(ctx: StatusCtx): UsageProvider | undefined {
 		const model = ctx.model;
@@ -328,10 +360,12 @@ export default function usageStatus(pi: ExtensionAPI) {
 			if (response.status === 401 || response.status === 403) {
 				state.loginNeeded = true;
 				state.fetchFailed = false;
+				clearRetry(state);
 				return;
 			}
 			if (!response.ok) {
 				state.fetchFailed = true; // shown as "(stale)" / "usage n/a"
+				scheduleRetry(state, response.headers.get("retry-after"));
 				return;
 			}
 			const json: unknown = await response.json();
@@ -341,9 +375,12 @@ export default function usageStatus(pi: ExtensionAPI) {
 			state.loginNeeded = false;
 			// An unrecognized/empty payload counts as a failed read too.
 			state.fetchFailed = parsed.length === 0;
+			if (state.fetchFailed) scheduleRetry(state);
+			else clearRetry(state);
 		} catch {
 			// Keep last known data, but surface the failure in the status line.
 			state.fetchFailed = true;
+			scheduleRetry(state);
 		} finally {
 			state.inFlight = false;
 			// A different model may have been selected while the fetch was running.
@@ -471,6 +508,7 @@ export default function usageStatus(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		if (idleTimer) clearInterval(idleTimer);
 		idleTimer = undefined;
+		for (const state of states.values()) clearRetry(state);
 		currentCtx = undefined;
 	});
 }
