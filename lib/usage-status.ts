@@ -264,8 +264,14 @@ interface ProviderState extends StatusSnapshot {
 	retryTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
+declare global {
+	// Hosts such as ThinkRail run many Pi sessions in one process; they share one poll per provider.
+	var __pcbrUsageStates: Map<UsageProvider, ProviderState> | undefined;
+}
+
 export default function usageStatus(pi: ExtensionAPI) {
-	const states = new Map<UsageProvider, ProviderState>();
+	globalThis.__pcbrUsageStates ??= new Map<UsageProvider, ProviderState>();
+	const states = globalThis.__pcbrUsageStates;
 	let currentCtx: StatusCtx | undefined;
 	let idleTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -429,16 +435,16 @@ export default function usageStatus(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		warnOnConflict(ctx as unknown as StatusCtx);
 		if (!ctx.hasUI) return;
-		await refresh(ctx as unknown as StatusCtx, true);
+		await refresh(ctx as unknown as StatusCtx);
 		if (idleTimer) clearInterval(idleTimer);
 		idleTimer = setInterval(() => {
-			if (currentCtx) void refresh(currentCtx, true);
+			if (currentCtx) void refresh(currentCtx);
 		}, IDLE_REFRESH_MS);
 		idleTimer.unref?.();
 	});
 
 	pi.on("model_select", async (event, ctx) => {
-		await refresh({ ...ctx, model: event.model } as unknown as StatusCtx, true);
+		await refresh({ ...ctx, model: event.model } as unknown as StatusCtx);
 	});
 
 	pi.on("after_provider_response", async (event, ctx) => {
