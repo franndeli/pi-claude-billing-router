@@ -1,5 +1,10 @@
 # pi-claude-billing-router
 
+[![npm version](https://img.shields.io/npm/v/pi-claude-billing-router?logo=npm)](https://www.npmjs.com/package/pi-claude-billing-router)
+[![npm downloads](https://img.shields.io/npm/dm/pi-claude-billing-router)](https://www.npmjs.com/package/pi-claude-billing-router)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Pi package](https://img.shields.io/badge/pi-package-8A2BE2)](https://pi.dev/packages/pi-claude-billing-router)
+
 Use your Claude Pro/Max subscription with [pi](https://pi.dev) — and when the
 plan runs out, **keep working on extra-usage credits instead of hitting a wall**.
 
